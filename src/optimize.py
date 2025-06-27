@@ -1,5 +1,7 @@
 import os
+import random
 import sys
+from itertools import chain
 
 if sys.platform.startswith("win"):
     # ==== BEGIN fcntl stub for Windows ====
@@ -864,15 +866,169 @@ def configs_to_individuals(cfgs, bounds, sig_digits=0):
             individual = config_to_individual(fcfg, bounds, sig_digits)
             inds[calc_hash(individual)] = individual
             # add duplicate of config, but with lowered total wallet exposure limit
-            fcfg2 = deepcopy(fcfg)
-            for pside in ["long", "short"]:
-                fcfg2["bot"][pside]["total_wallet_exposure_limit"] *= 0.75
-            individual2 = config_to_individual(fcfg2, bounds, sig_digits)
-            inds[calc_hash(individual2)] = individual2
+            # fcfg2 = deepcopy(fcfg)
+            # for pside in ["long", "short"]:
+            #     fcfg2["bot"][pside]["total_wallet_exposure_limit"] *= 0.75
+            # individual2 = config_to_individual(fcfg2, bounds, sig_digits)
+            #inds[calc_hash(individual2)] = individual2
         except Exception as e:
             logging.error(f"error loading starting config: {e}")
     return list(inds.values())
 
+def eaMuPlusLambdaDemeses(population, toolbox, demes_toolboxes, mu, lambda_, cxpb, mutpb, ngen,
+                   stats=None, halloffame=None, verbose=__debug__):
+    
+    logbook = tools.Logbook()
+    logbook.header = ['gen', 'nevals'] + (stats.fields if stats else [])         
+
+    # Evaluate the individuals with an invalid fitness
+    invalid_ind = [ind for ind in population if not ind.fitness.valid]
+    fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
+    for ind, fit in zip(invalid_ind, fitnesses):
+        ind.fitness.values = fit
+
+    if halloffame is not None:
+        halloffame.update(population)
+
+    record = stats.compile(population) if stats is not None else {}
+    logbook.record(gen=0, nevals=len(invalid_ind), **record)
+    if verbose:
+        print(logbook.stream)
+
+    n_demes = 4
+    demes = [deepcopy(population) for _ in range(n_demes)]
+
+    migration_interval = 2
+
+    # Begin the generational process
+    for gen in range(1, ngen + 1):
+
+        total_nevals = 0
+
+        for i, (deme) in enumerate(zip(demes)):
+
+            best_ind = tools.selBest(demes[i], k=1)[0]  # Лучшая особь
+            mask = demes_toolboxes[i].get_mask()
+        
+            for ind in demes[i]:
+                if ind is not best_ind:
+                    for gene_idx, is_dynamic in enumerate(mask):
+                        if not is_dynamic:  # Ген статичен (блокирован)
+                            ind[gene_idx] = best_ind[gene_idx]
+
+            # Vary the population
+            offspring = algorithms.varOr( demes[i], demes_toolboxes[i], lambda_, cxpb, mutpb)
+
+            # Evaluate the individuals with an invalid fitness
+            invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+            fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
+            for ind, fit in zip(invalid_ind, fitnesses):
+                ind.fitness.values = fit
+
+            total_nevals += len(invalid_ind)
+
+            # Select the next generation population
+            demes[i][:] = toolbox.select( demes[i] + offspring, mu)
+
+        if gen % migration_interval == 0:           
+            # Используем стандартную миграцию DEAP
+            logging.info(f"Migrate demes")
+            toolbox.migrate(demes)
+
+        if halloffame is not None:
+            all_individuals = [ind for deme in demes for ind in deme]
+            halloffame.update(all_individuals)
+        
+        # Сбор статистики по всем островам
+        if stats is not None:
+            all_individuals = [ind for deme in demes for ind in deme]
+            record = stats.compile(all_individuals)
+        else:
+            record = {}
+
+        # Запись в лог (общая для всех островов)
+        logbook.record(gen=gen, nevals=total_nevals, **record)
+        if verbose:
+            print(logbook.stream)
+
+    return population, logbook
+
+PARAM_BLOCKS = {
+    "strategy": slice(0, 18), 
+    "filter": slice(18, 23),
+    "unstuck": slice(23, 27), 
+    "full": slice(0, 54),
+}
+
+def create_block_mask(block_name, total_length=54):
+    mask = np.zeros(total_length, dtype=bool)
+    mask[PARAM_BLOCKS[block_name]] = 1
+    return mask
+
+def mutate_entry_block(individual, bounds, mask_name):
+
+    mask = create_block_mask(mask_name)    
+
+    low=[low for low, high in bounds]
+    up=[high for low, high in bounds]
+
+     # Применение маски: фиксация границ для заблокированных генов
+    for i in range(len(mask)):
+        if mask[i] == False:  # Если ген заблокирован
+            low[i] = individual[i]  # Нижняя граница = текущему значению
+            up[i] = individual[i]   # Верхняя граница = текущему значению
+
+    mut = mutPolynomialBoundedWrapper(individual, eta=20.0,
+             low=low,
+             up=up,
+             indpb=1.0 / len(bounds)) 
+
+    return mut
+
+def mate_entry_block(ind1, ind2, bounds, mask_name):
+
+    mask = create_block_mask(mask_name); 
+
+    low=[low for low, high in bounds]
+    up=[high for low, high in bounds]
+
+     # Применение маски: фиксация границ для заблокированных генов
+    for i in range(len(mask)):
+        if mask[i] == False:  # Если ген заблокирован
+            if random.random() <= 0.5:
+                low[i] = ind1[i]
+                up[i] = ind1[i]
+            else:
+                low[i] = ind2[i]
+                up[i] = ind2[i]
+
+    return cxSimulatedBinaryBoundedWrapper(ind1, ind2, eta=20.0,
+            low=[low for low, high in bounds],
+            up=[high for low, high in bounds])
+
+def create_specialized_toolboxes(base_toolbox, bounds):  
+
+    toolboxes = []
+
+    specializations = [
+        (lambda ind: mutate_entry_block(ind, bounds, "strategy"), lambda ind1, ind2: mate_entry_block(ind1, ind2, bounds, "strategy"), lambda: create_block_mask("strategy")),
+        (lambda ind: mutate_entry_block(ind, bounds, "filter"), lambda ind1, ind2: mate_entry_block(ind1, ind2, bounds, "filter"), lambda: create_block_mask("filter")),
+        (lambda ind: mutate_entry_block(ind, bounds, "unstuck"), lambda ind1, ind2: mate_entry_block(ind1, ind2, bounds, "unstuck"), lambda: create_block_mask("unstuck")),
+        (lambda ind: mutate_entry_block(ind, bounds, "full"), lambda ind1, ind2: mate_entry_block(ind1, ind2, bounds, "full"), lambda: create_block_mask("full"))
+    ]
+    
+    for mutate_func, mate_func, mask_func in specializations:
+        # Глубокое копирование базового toolbox
+        spec_toolbox = base.Toolbox() #clone_toolbox(base_toolbox)
+        
+        # Переопределение операторов
+        spec_toolbox.register("mutate", mutate_func)
+        spec_toolbox.register("mate", mate_func)
+        spec_toolbox.register("get_mask", mask_func)
+        
+        toolboxes.append(spec_toolbox)
+    
+    return toolboxes
 
 async def main():
     manage_rust_compilation()
@@ -1078,22 +1234,25 @@ async def main():
         toolbox.register("evaluate", evaluator.evaluate, overrides_list=overrides_list)
 
         # Register genetic operators
-        toolbox.register(
-            "mate",
-            cxSimulatedBinaryBoundedWrapper,
-            eta=20.0,
-            low=[low for low, high in bounds],
-            up=[high for low, high in bounds],
-        )
-        toolbox.register(
-            "mutate",
-            mutPolynomialBoundedWrapper,
-            eta=20.0,
-            low=[low for low, high in bounds],
-            up=[high for low, high in bounds],
-            indpb=1.0 / len(bounds),
-        )
-        toolbox.register("select", tools.selNSGA2)
+        # toolbox.register(
+        #     "mate",
+        #     cxSimulatedBinaryBoundedWrapper,
+        #     eta=20.0,
+        #     low=[low for low, high in bounds],
+        #     up=[high for low, high in bounds],
+        # )
+        # toolbox.register(
+        #     "mutate",
+        #     mutPolynomialBoundedWrapper,
+        #     eta=20.0,
+        #     low=[low for low, high in bounds],
+        #     up=[high for low, high in bounds],
+        #     indpb=1.0 / len(bounds),
+        # )
+        toolbox.register("select", tools.selNSGA2)        
+
+        #migrants=int(config["optimize"]["population_size"]/2)
+        toolbox.register("migrate", tools.migRing, k=1, selection=tools.selBest)
 
         # Parallelization setup
         logging.info(f"Initializing multiprocessing pool. N cpus: {config['optimize']['n_cpus']}")
@@ -1143,11 +1302,14 @@ async def main():
 
         hof = tools.ParetoFront()
 
+        demes_toolboxes = create_specialized_toolboxes(toolbox, bounds)
+
         # Run the optimization
         logging.info(f"Starting optimize...")
-        population, logbook = algorithms.eaMuPlusLambda(
+        population, logbook = eaMuPlusLambdaDemeses(
             population,
             toolbox,
+            demes_toolboxes,
             mu=config["optimize"]["population_size"],
             lambda_=config["optimize"]["population_size"],
             cxpb=config["optimize"]["crossover_probability"],
