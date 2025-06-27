@@ -245,24 +245,75 @@ impl<'a> Backtest<'a> {
         }
     }
 
+fn calc_atr(&self, idx: usize, start_k: usize, end_k: usize) -> f64 {
+    // Базовые проверки корректности параметров
+    if start_k >= end_k {
+        return 0.0;
+    }
+    
+    // Для расчета TR нужны данные предыдущего периода
+    if start_k == 0 {
+        return 0.0;
+    }
+
+    let period = (end_k - start_k) as f64;
+    
+    // Рассчитываем сумму всех TR в диапазоне
+    let mut tr_sum = 0.0;
+    let mut prev_close = self.hlcvs[[start_k - 1, idx, CLOSE]];
+    
+    for k in start_k..end_k {
+        let high = self.hlcvs[[k, idx, HIGH]];
+        let low = self.hlcvs[[k, idx, LOW]];
+        let close = self.hlcvs[[k, idx, CLOSE]];
+        
+        let tr = (high - low)
+            .max((high - prev_close).abs())
+            .max((low - prev_close).abs());
+        
+        tr_sum += tr;
+        prev_close = close;
+    }
+    
+    tr_sum / period
+}
+
+
     pub fn calc_preferred_coins(&mut self, k: usize, pside: usize) -> Vec<usize> {
-        let (bot_params, n_positions) = match pside {
-            LONG => (
-                &self.bot_params_pair.long,
-                self.bot_params_pair.long.n_positions,
-            ),
-            SHORT => (
-                &self.bot_params_pair.short,
-                self.bot_params_pair.short.n_positions,
-            ),
+
+        let n_positions = match pside {
+            LONG => self.bot_params_pair.long.n_positions,
+            SHORT => self.bot_params_pair.short.n_positions,
             _ => panic!("Invalid pside"),
         };
+
 
         if self.n_coins <= n_positions {
             return (0..self.n_coins).collect();
         }
+
+
         let volume_filtered = self.filter_by_relative_volume(k, pside);
-        self.rank_by_noisiness(k, &volume_filtered, pside)
+
+
+        let bot_params = match pside {
+            LONG => &self.bot_params_pair.long,
+            SHORT => &self.bot_params_pair.short,
+            _ => panic!("Invalid pside"),
+        };
+
+
+        let atr_filtered: Vec<usize> = volume_filtered.into_iter().filter(|&idx| {
+            if bot_params.filter_atr_rolling_window == 0 {
+                return true;
+            }
+            let start_k = k.saturating_sub(bot_params.filter_atr_rolling_window);
+            let atr = self.calc_atr(idx, start_k, k);
+            atr <= bot_params.filter_atr_max_threshold
+        }).collect();
+
+
+        self.rank_by_noisiness(k, &atr_filtered, pside)
     }
 
     fn filter_by_relative_volume(&mut self, k: usize, pside: usize) -> Vec<usize> {

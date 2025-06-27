@@ -116,6 +116,8 @@ pub struct BotParams {
     pub filter_noisiness_rolling_window: usize,
     pub filter_volume_rolling_window: usize,
     pub filter_volume_drop_pct: f64,
+    pub filter_atr_rolling_window: usize,
+    pub filter_atr_max_threshold: f64,
     pub ema_span_0: f64,
     pub ema_span_1: f64,
     pub n_positions: usize,
