@@ -264,6 +264,12 @@ fn bot_params_from_dict(dict: &PyDict) -> PyResult<BotParams> {
         unstuck_ema_dist: extract_value(dict, "unstuck_ema_dist")?,
         unstuck_loss_allowance_pct: extract_value(dict, "unstuck_loss_allowance_pct")?,
         unstuck_threshold: extract_value(dict, "unstuck_threshold")?,
+        filter_atr_max_threshold: extract_value(dict, "filter_atr_max_threshold")?,
+        filter_atr_rolling_window: 
+        {
+            let atr_rolling_window: f64 = extract_value(dict, "filter_atr_rolling_window")?;
+            atr_rolling_window.round() as usize
+        },
     })
 }
 
